@@ -1,37 +1,128 @@
-import Link from "next/link";
+"use client";
+
+import { useState } from "react";
+
+type Analysis = {
+  text: string;
+  author?: string;
+  created_at?: string;
+  scores: { real: number; fake: number };
+};
 
 export default function HomePage() {
+  const [url, setUrl] = useState("");
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const isTwitterUrl = (u: string) => {
+    try {
+      const parsed = new URL(u);
+      return /(^|\.)twitter\.com$|(^|\.)x\.com$/.test(parsed.hostname);
+    } catch {
+      return false;
+    }
+  };
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setAnalysis(null);
+
+    if (!isTwitterUrl(url)) {
+      setError("Please paste a valid Twitter/X URL.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const base = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "") || "";
+      const endpoint = `${base}/analyze`;
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) throw new Error("Failed to analyze. Try again.");
+      const data: Analysis = await res.json();
+      setAnalysis(data);
+    } catch (err: any) {
+      setError(err?.message ?? "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const realPct = analysis ? Math.round(analysis.scores.real * 100) : 0;
+  const fakePct = analysis ? Math.round(analysis.scores.fake * 100) : 0;
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-b from-[#2e026d] to-[#15162c] text-white">
-      <div className="container flex flex-col items-center justify-center gap-12 px-4 py-16">
-        <h1 className="text-5xl font-extrabold tracking-tight text-white sm:text-[5rem]">
-          Create <span className="text-[hsl(280,100%,70%)]">T3</span> App
-        </h1>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:gap-8">
-          <Link
-            className="flex max-w-xs flex-col gap-4 rounded-xl bg-white/10 p-4 text-white hover:bg-white/20"
-            href="https://create.t3.gg/en/usage/first-steps"
-            target="_blank"
-          >
-            <h3 className="text-2xl font-bold">First Steps →</h3>
-            <div className="text-lg">
-              Just the basics - Everything you need to know to set up your
-              database and authentication.
-            </div>
-          </Link>
-          <Link
-            className="flex max-w-xs flex-col gap-4 rounded-xl bg-white/10 p-4 text-white hover:bg-white/20"
-            href="https://create.t3.gg/en/introduction"
-            target="_blank"
-          >
-            <h3 className="text-2xl font-bold">Documentation →</h3>
-            <div className="text-lg">
-              Learn more about Create T3 App, the libraries it uses, and how to
-              deploy it.
-            </div>
-          </Link>
+    <main className="min-h-screen bg-background text-foreground">
+      <section className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-12">
+        <div className="space-y-2">
+          <h1 className="text-3xl font-semibold tracking-tight">Fake News Detector</h1>
+          <p className="text-sm text-muted-foreground">
+            Paste a Twitter/X post URL. We'll fetch the content and estimate whether it's real or fake.
+          </p>
         </div>
-      </div>
+
+        <form onSubmit={onSubmit} className="flex w-full items-center gap-2">
+          <input
+            type="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://twitter.com/... or https://x.com/..."
+            className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+          />
+          <button
+            type="submit"
+            disabled={loading}
+            className="inline-flex items-center justify-center whitespace-nowrap rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background shadow transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? "Analyzing..." : "Analyze"}
+          </button>
+        </form>
+
+        {error && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        {analysis && (
+          <div className="grid gap-4 md:grid-cols-5">
+            <div className="md:col-span-3 space-y-3 rounded-lg border bg-card p-4">
+              <div className="text-xs text-muted-foreground">Tweet content</div>
+              <div className="whitespace-pre-wrap text-sm leading-6">{analysis.text}</div>
+              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                {analysis.author && <span>Author: {analysis.author}</span>}
+                {analysis.created_at && <span>Posted: {new Date(analysis.created_at).toLocaleString()}</span>}
+              </div>
+            </div>
+            <div className="md:col-span-2 space-y-3 rounded-lg border bg-card p-4">
+              <div className="text-xs text-muted-foreground">Assessment</div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">Real</span>
+                  <span className="tabular-nums">{realPct}%</span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded bg-muted">
+                  <div className="h-full bg-green-600" style={{ width: `${realPct}%` }} />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">Fake</span>
+                  <span className="tabular-nums">{fakePct}%</span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded bg-muted">
+                  <div className="h-full bg-red-600" style={{ width: `${fakePct}%` }} />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
     </main>
   );
 }
