@@ -2,9 +2,6 @@ import os
 from typing import Dict
 
 import modal
-import numpy as np
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,7 +11,12 @@ app = modal.App("fake-news-inference")
 
 # Build a lightweight image with needed deps (CPU for simplicity)
 image = (
-    modal.Image.debian_slim()
+    modal.Image
+    .from_registry("nvidia/cuda:12.1.1-devel-ubuntu20.04", add_python=True)
+    .add_local_dir(
+        local_path=os.path.join(os.path.dirname(__file__), "model"),
+        remote_path="/model",
+    )
     .pip_install(
         [
             "torch==2.3.1",
@@ -26,12 +28,6 @@ image = (
     )
 )
 
-# Mount the local model directory into the container at /model
-# Local path: backend/model/model -> remote: /model
-model_mount = modal.Mount.from_local_dir(
-    local_path=os.path.join(os.path.dirname(__file__), "model"),
-    remote_path="/model",
-)
 
 # Paths inside the container
 MODEL_PATH = "/model/distilbert_model"
@@ -42,6 +38,8 @@ model = None
 tokenizer = None
 
 def ensure_loaded():
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    import torch
     global model, tokenizer
     if model is None or tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
@@ -49,14 +47,16 @@ def ensure_loaded():
         model.eval()
 
 
-def softmax_probs(logits: torch.Tensor) -> Dict[str, float]:
-    probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+def softmax_probs(logits) -> Dict[str, float]:
+    import torch
+    probs = torch.softmax(logits, dim=1).squeeze(0).tolist()
     # Assume binary: index 0 = Fake, index 1 = Real
     return {"fake": float(probs[0]), "real": float(probs[1])}
 
 
-@app.function(image=image, mounts=[model_mount], timeout=120)
+@app.function(image=image, timeout=120)
 def infer_from_text(text: str):
+    import torch
     ensure_loaded()
     inputs = tokenizer(
         text,
@@ -69,7 +69,6 @@ def infer_from_text(text: str):
         outputs = model(**inputs)
         logits = outputs.logits
         probs = softmax_probs(logits)
-    # Return normalized payload for backend/UI
     return {
         "text": text,
         "scores": {"real": round(probs["real"], 4), "fake": round(probs["fake"], 4)},
@@ -77,7 +76,7 @@ def infer_from_text(text: str):
 
 
 # Optional: fetch tweet text by URL using Tweepy v2 Client (Bearer Token)
-@app.function(image=image, mounts=[model_mount], timeout=120)
+@app.function(image=image, timeout=120)
 def infer_from_url(url: str):
     import tweepy  # imported inside function to keep cold start lean
 
