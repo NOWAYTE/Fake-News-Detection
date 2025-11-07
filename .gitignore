@@ -1,3 +1,4 @@
 .env
 venv/
 backend/model/model/
+backend/model/model/distilber_model/model.safetensors
