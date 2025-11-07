@@ -4,9 +4,10 @@ import { useState } from "react";
 
 type Analysis = {
   text: string;
+  prediction: "real" | "fake" | string;
+  confidence: number; // confidence of the predicted class
   author?: string;
   created_at?: string;
-  scores: { real: number; fake: number };
 };
 
 export default function HomePage() {
@@ -53,8 +54,11 @@ export default function HomePage() {
     }
   };
 
-  const realPct = analysis ? Math.round(analysis.scores.real * 100) : 0;
-  const fakePct = analysis ? Math.round(analysis.scores.fake * 100) : 0;
+  // Convert prediction+confidence into real/fake percentages
+  const realPct = analysis
+    ? Math.round(((analysis.prediction === "real" ? analysis.confidence : 1 - analysis.confidence) || 0) * 100)
+    : 0;
+  const fakePct = analysis ? 100 - realPct : 0;
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -126,3 +130,4 @@ export default function HomePage() {
     </main>
   );
 }
+
