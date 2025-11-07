@@ -24,7 +24,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Modal lazy loader ---
+# --- Modal app reference ---
+_modal_app = None
 _modal_text_func = None
 _modal_url_func = None
 
@@ -39,8 +40,8 @@ def get_modal_functions():
     if not app_name:
         raise RuntimeError("Missing MODAL_APP_NAME in .env")
 
-    _modal_text_func = modal.Function.lookup(app_name, text_func_name)
-    _modal_url_func = modal.Function.lookup(app_name, url_func_name)
+    _modal_text_func = modal.Function.from_name(app_name, text_func_name)
+    _modal_url_func = modal.Function.from_name(app_name, url_func_name)
     return _modal_text_func, _modal_url_func
 
 # --- Request / Response models ---
@@ -54,47 +55,39 @@ class Scores(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     text: str
-    author: Optional[str] = None
+    prediction: str
+    confidence: float
+    tweet_url: Optional[str] = None
+    tweet_id: Optional[str] = None
     created_at: Optional[str] = None
-    scores: Scores
 
 # --- Utilities ---
-def normalize_scores(obj: Dict[str, Any]) -> Scores:
-    real = obj.get("real")
-    fake = obj.get("fake")
-    if real is None and fake is None:
-        p = float(obj.get("prob", obj.get("p", 0.5)))
-        fake = p
-        real = 1 - p
-    elif real is None:
-        fake = float(fake)
-        real = 1 - fake
-    elif fake is None:
-        real = float(real)
-        fake = 1 - real
-    real_f = max(0.0, min(1.0, float(real)))
-    fake_f = max(0.0, min(1.0, float(fake)))
-    return Scores(real=real_f, fake=fake_f)
-
 def normalize_response(data: Dict[str, Any]) -> AnalyzeResponse:
-    text = str(data.get("text") or data.get("content") or "").strip()
-    if not text:
-        raise ValueError("Modal response missing 'text' or 'content'")
-
-    author = data.get("author") or data.get("handle")
-    created_at = data.get("created_at") or data.get("timestamp")
-    if isinstance(created_at, (int, float)):
+    # Extract basic fields
+    text = data.get("text", "")
+    prediction = data.get("prediction", "unknown")
+    confidence = data.get("confidence", 0.5)
+    
+    # Extract tweet metadata if available
+    tweet_url = data.get("tweet_url")
+    tweet_id = data.get("tweet_id")
+    created_at = data.get("created_at")
+    
+    # Ensure confidence is float
+    if isinstance(confidence, str):
         try:
-            created_at = datetime.utcfromtimestamp(float(created_at)).isoformat() + "Z"
-        except Exception:
-            created_at = None
-
-    scores_raw = data.get("scores") or data.get("score") or {}
-    if not isinstance(scores_raw, dict):
-        scores_raw = {}
-    scores = normalize_scores(scores_raw)
-
-    return AnalyzeResponse(text=text, author=author, created_at=created_at, scores=scores)
+            confidence = float(confidence)
+        except ValueError:
+            confidence = 0.5
+    
+    return AnalyzeResponse(
+        text=text,
+        prediction=prediction,
+        confidence=confidence,
+        tweet_url=tweet_url,
+        tweet_id=tweet_id,
+        created_at=created_at
+    )
 
 # --- Endpoint ---
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -112,12 +105,25 @@ async def analyze(body: AnalyzeRequest):
         raise HTTPException(status_code=400, detail="Request must include 'text' or 'url'")
 
     try:
-        # Synchronous call to Modal function
-        result = func.call(input_value)
+        # Call Modal function (use .remote() for async, .call() for sync)
+        result = func.remote(input_value)
+        
         if not isinstance(result, dict):
             raise ValueError("Modal function returned non-dict payload")
+        
         return normalize_response(result)
+        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "message": "Fake News Detection API is running"}
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"message": "Fake News Detection API", "version": "1.0"}
