@@ -1,10 +1,6 @@
 import os
 from typing import Dict
-
 import modal
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Modal app name
 app = modal.App("fake-news-inference")
@@ -28,6 +24,8 @@ image = (
     )
 )
 
+
+secrets = [modal.Secret.from_name("x-creds")]
 
 # Paths inside the container
 MODEL_PATH = "/model/distilbert_model"
@@ -54,7 +52,7 @@ def softmax_probs(logits) -> Dict[str, float]:
     return {"fake": float(probs[0]), "real": float(probs[1])}
 
 
-@app.function(image=image, timeout=120)
+@app.function(image=image, secrets=secrets, timeout=120)
 def infer_from_text(text: str):
     import torch
     ensure_loaded()
@@ -76,7 +74,7 @@ def infer_from_text(text: str):
 
 
 # Optional: fetch tweet text by URL using Tweepy v2 Client (Bearer Token)
-@app.function(image=image, timeout=120)
+@app.function(image=image, secrets=secrets, timeout=120)
 def infer_from_url(url: str):
     import tweepy  # imported inside function to keep cold start lean
 
