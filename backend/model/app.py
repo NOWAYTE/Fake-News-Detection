@@ -1,109 +1,196 @@
 import os
-from typing import Dict
 import modal
 
-# Modal app name
-app = modal.App("fake-news-inference")
+# Modal app
+app = modal.App("fake-news-detector")
 
-# Build a lightweight image with needed deps (CPU for simplicity)
+# Create a volume for model storage
+model_volume = modal.Volume.from_name("model-store", create_if_missing=True)
+
+# Build image
 image = (
     modal.Image
-    .from_registry("nvidia/cuda:12.1.1-devel-ubuntu20.04", add_python=True)
+    .from_registry("python:3.11-slim", add_python=False)
+    .pip_install([
+        "torch==2.3.1",
+        "transformers==4.44.2",
+        "tweepy==4.14.0",
+        "numpy==1.26.4",
+    ])
     .add_local_dir(
-        local_path=os.path.join(os.path.dirname(__file__), "model"),
-        remote_path="/model",
-    )
-    .pip_install(
-        [
-            "torch==2.3.1",
-            "transformers==4.44.2",
-            "tweepy==4.14.0",
-            "python-dotenv==1.0.1",
-            "numpy==1.26.4",
-        ]
+        local_path=os.path.join(os.path.dirname(__file__), ".."),
+        remote_path="/root",
     )
 )
 
+# Paths
+VOLUME_PATH = "/model_volume"
+MODEL_PATH = f"{VOLUME_PATH}/distilbert_model"
+TOKENIZER_PATH = f"{VOLUME_PATH}/tokenizer"
+LOCAL_MODEL_PATH = "/root/model/model/distilbert_model"
+LOCAL_TOKENIZER_PATH = "/root/model/model/tokenizer"
 
-secrets = [modal.Secret.from_name("x-creds")]
-
-# Paths inside the container
-MODEL_PATH = "/model/distilbert_model"
-TOKENIZER_PATH = "/model/tokenizer"
-
-# Lazy-loaded globals within the container
-model = None
-tokenizer = None
-def ensure_loaded():
+# Import inside container context
+with image.imports():
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    import torch, os
+    import torch
 
-    global model, tokenizer
+# Define functions first, then decorate them
+def load_model():
+    """Load model from volume"""
+    import os
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    import torch
+
+    model = None
+    tokenizer = None
 
     if model is None or tokenizer is None:
-        print(">>> Loading tokenizer from", TOKENIZER_PATH)
-        print(">>> Loading model from", MODEL_PATH)
-        print(">>> Files in /model:", os.listdir("/model"))
-        print(">>> Files in /model/model:", os.listdir("/model/model") if os.path.exists("/model/model") else "none")
+        print("🔄 Loading model from volume...")
+
+        if not os.path.exists(MODEL_PATH):
+            raise RuntimeError(f"Model not found in volume at {MODEL_PATH}")
 
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
-        print(">>> Tokenizer loaded:", tokenizer.__class__.__name__)
-
         model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
-        print(">>> Model loaded:", model.__class__.__name__)
-
         model.eval()
-        print(">>> Model set to eval mode")
+        print("✅ Model loaded from volume!")
 
+    return model, tokenizer
 
-def softmax_probs(logits) -> Dict[str, float]:
-    import torch
-    probs = torch.softmax(logits, dim=1).squeeze(0).tolist()
-    # Assume binary: index 0 = Fake, index 1 = Real
-    return {"fake": float(probs[0]), "real": float(probs[1])}
+# Define the function separately
+def _infer_from_text(text: str):
+    try:
+        if not text or not isinstance(text, str):
+            raise ValueError("Text must be a non-empty string")
 
+        model, tokenizer = load_model()
 
-@app.function(image=image, secrets=secrets, timeout=120)
-def infer_from_text(text: str):
-    import torch
-    ensure_loaded()
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=256,
-    )
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits
-        probs = softmax_probs(logits)
-    return {
-        "text": text,
-        "scores": {"real": round(probs["real"], 4), "fake": round(probs["fake"], 4)},
-    }
+        inputs = tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=256,
+        )
 
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=1).squeeze(0).tolist()
 
-# Optional: fetch tweet text by URL using Tweepy v2 Client (Bearer Token)
-@app.function(image=image, secrets=secrets, timeout=120)
-def infer_from_url(url: str):
-    import tweepy  # imported inside function to keep cold start lean
+        # Get prediction and confidence
+        real_prob = probs[1]  # Assuming index 1 is "real"
+        fake_prob = probs[0]  # Assuming index 0 is "fake"
 
-    # Read bearer token; support both BEARER_TOKEN and (legacy) BEARER_TOKE
-    bearer = os.getenv("BEARER_TOKEN") or os.getenv("BEARER_TOKEN")
-    if not bearer:
-        raise RuntimeError("Missing BEARER_TOKEN environment variable for Tweepy Client")
+        prediction = "real" if real_prob > fake_prob else "fake"
+        confidence = real_prob if prediction == "real" else fake_prob
 
-    # Extract tweet ID from URL
-    tweet_id = url.rstrip("/").split("/")[-1]
+        result = {
+            "text": text,
+            "prediction": prediction,
+            "confidence": round(confidence, 4)
+        }
 
-    client = tweepy.Client(bearer_token=bearer, wait_on_rate_limit=True)
-    resp = client.get_tweet(id=tweet_id, tweet_fields=["created_at"])  # text included by default
-    if not resp or not resp.data:
-        raise RuntimeError("Failed to fetch tweet")
+        print("🎯 RESULT:", result)
+        return result
 
-    text = getattr(resp.data, "text", None)
-    if not text:
-        raise RuntimeError("Tweet has no text field")
+    except Exception as e:
+        error_result = {"error": str(e), "text": text}
+        print("❌ ERROR:", error_result)
+        return error_result
 
-    return infer_from_text.remote(text)
+def _infer_from_url(tweet_url: str):  # Fixed: Added this function definition
+    try:
+        import tweepy
+        import re
+
+        bearer_token = os.getenv("BEARER_TOKEN")
+        if not bearer_token:
+            raise RuntimeError("BEARER_TOKEN not found")
+
+        tweet_id_match = re.search(r'/status/(\d+)', tweet_url)
+        if not tweet_id_match:
+            raise ValueError(f"Invalid tweet URL: {tweet_url}")
+
+        tweet_id = tweet_id_match.group(1)
+
+        client = tweepy.Client(bearer_token=bearer_token)
+        tweet = client.get_tweet(tweet_id, tweet_fields=["text", "created_at"])
+
+        if not tweet or not tweet.data:
+            raise RuntimeError("Failed to fetch tweet")
+
+        # Get the tweet text
+        tweet_text = tweet.data.text
+        print(f"📱 Fetched tweet: {tweet_text}")
+
+        # Call infer_from_text using .remote()
+        result = infer_from_text.remote(tweet_text)
+
+        # Add tweet metadata to the result
+        result["tweet_url"] = tweet_url
+        result["tweet_id"] = tweet_id
+        if hasattr(tweet.data, 'created_at'):
+            result["created_at"] = tweet.data.created_at.isoformat()
+
+        print("🎯 TWEET RESULT:", result)
+        return result
+
+    except Exception as e:
+        error_result = {"error": str(e), "url": tweet_url}
+        print("❌ TWEET ERROR:", error_result)
+        return error_result
+
+def _setup_volume():
+    """Copy local model files to the volume (run this once)"""
+    import shutil
+    import os
+
+    print("📦 Setting up model volume...")
+
+    if os.path.exists(MODEL_PATH) and os.listdir(MODEL_PATH):
+        print("✅ Volume already populated")
+        return {"status": "already_setup"}
+
+    if os.path.exists(LOCAL_MODEL_PATH):
+        print(f"📁 Copying model from {LOCAL_MODEL_PATH} to {MODEL_PATH}")
+        shutil.copytree(LOCAL_MODEL_PATH, MODEL_PATH)
+    else:
+        raise RuntimeError(f"Local model not found at {LOCAL_MODEL_PATH}")
+
+    if os.path.exists(LOCAL_TOKENIZER_PATH):
+        print(f"📁 Copying tokenizer from {LOCAL_TOKENIZER_PATH} to {TOKENIZER_PATH}")
+        shutil.copytree(LOCAL_TOKENIZER_PATH, TOKENIZER_PATH)
+    else:
+        raise RuntimeError(f"Local tokenizer not found at {LOCAL_TOKENIZER_PATH}")
+
+    print("✅ Volume setup complete!")
+    return {"status": "volume_ready"}
+
+def _health_check():
+    return {"status": "healthy", "message": "App is running"}
+
+# Now apply the decorators
+infer_from_text = app.function(
+    image=image,
+    volumes={VOLUME_PATH: model_volume},
+    secrets=[modal.Secret.from_name("x-creds")],
+    scaledown_window=300,
+    timeout=120,
+)(_infer_from_text)
+
+infer_from_url = app.function(
+    image=image,
+    volumes={VOLUME_PATH: model_volume},
+    secrets=[modal.Secret.from_name("x-creds")],
+    scaledown_window=300,
+    timeout=120,
+)(_infer_from_url)
+
+setup_volume = app.function(
+    image=image,
+    volumes={VOLUME_PATH: model_volume},
+)(_setup_volume)
+
+health_check = app.function(image=image)(_health_check)
