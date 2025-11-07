@@ -34,15 +34,26 @@ TOKENIZER_PATH = "/model/tokenizer"
 # Lazy-loaded globals within the container
 model = None
 tokenizer = None
-
 def ensure_loaded():
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    import torch
+    import torch, os
+
     global model, tokenizer
+
     if model is None or tokenizer is None:
+        print(">>> Loading tokenizer from", TOKENIZER_PATH)
+        print(">>> Loading model from", MODEL_PATH)
+        print(">>> Files in /model:", os.listdir("/model"))
+        print(">>> Files in /model/model:", os.listdir("/model/model") if os.path.exists("/model/model") else "none")
+
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
+        print(">>> Tokenizer loaded:", tokenizer.__class__.__name__)
+
         model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
+        print(">>> Model loaded:", model.__class__.__name__)
+
         model.eval()
+        print(">>> Model set to eval mode")
 
 
 def softmax_probs(logits) -> Dict[str, float]:
@@ -79,7 +90,7 @@ def infer_from_url(url: str):
     import tweepy  # imported inside function to keep cold start lean
 
     # Read bearer token; support both BEARER_TOKEN and (legacy) BEARER_TOKE
-    bearer = os.getenv("BEARER_TOKEN") or os.getenv("BEARER_TOKE")
+    bearer = os.getenv("BEARER_TOKEN") or os.getenv("BEARER_TOKEN")
     if not bearer:
         raise RuntimeError("Missing BEARER_TOKEN environment variable for Tweepy Client")
 
